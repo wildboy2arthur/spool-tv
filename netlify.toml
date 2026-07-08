@@ -1,0 +1,11 @@
+[build]
+  command = "pip install -r requirements-build.txt && python build.py"
+  publish = "dist"
+
+[build.environment]
+  PYTHON_VERSION = "3.12"
+
+[[headers]]
+  for = "/data/*"
+  [headers.values]
+    Cache-Control = "public, max-age=300"
