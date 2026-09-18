@@ -1,5 +1,7 @@
 
 
+import { RandomQueue } from "./random-queue.mjs";
+
 const DATA_URL = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
   ? "/api/channel"
   : "/data/channel.json";
@@ -131,6 +133,8 @@ const state = {
   activeVideoId: null,
   query: "",
 };
+
+const randomQueue = new RandomQueue();
 
 const els = {
   sidebar: document.getElementById("sidebar"),
@@ -347,18 +351,184 @@ function buildEmbedUrl(videoId, extra = {}) {
   return `https://www.youtube.com/embed/${videoId}?${params.toString()}`;
 }
 
-function pickRandomVideo() {
-  if (!state.videos.length) return null;
-  const index = Math.floor(Math.random() * state.videos.length);
-  return state.videos[index];
+const randomPlayback = {
+  player: null,
+  playerReady: false,
+  playerReadyPromise: null,
+  playerReadyResolve: null,
+  active: false,
+  generation: 0,
+  currentVideoId: null,
+  transitionInProgress: false,
+};
+
+let youtubeIframeApiPromise = null;
+
+function loadYouTubeIframeAPI() {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (youtubeIframeApiPromise) return youtubeIframeApiPromise;
+
+  youtubeIframeApiPromise = new Promise((resolve, reject) => {
+    const failTimer = setTimeout(() => {
+      reject(new Error("YouTube IFrame Player API 載入逾時"));
+    }, 15000);
+    const previousReadyCallback = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (typeof previousReadyCallback === "function") previousReadyCallback();
+      if (window.YT?.Player) {
+        clearTimeout(failTimer);
+        resolve(window.YT);
+      } else {
+        clearTimeout(failTimer);
+        reject(new Error("YouTube IFrame Player API 載入不完整"));
+      }
+    };
+
+    const existingScript = document.querySelector('script[src="https://www.youtube.com/iframe_api"]');
+    if (existingScript) return;
+
+    const script = document.createElement("script");
+    script.src = "https://www.youtube.com/iframe_api";
+    script.async = true;
+    script.onerror = () => {
+      clearTimeout(failTimer);
+      reject(new Error("無法載入 YouTube IFrame Player API"));
+    };
+    document.head.appendChild(script);
+  });
+
+  return youtubeIframeApiPromise;
 }
 
-function buildShuffleEmbedUrl(videoId) {
-  return buildEmbedUrl(videoId, {
-    autoplay: "1",
-    shuffle: "1",
-    playsinline: "1",
-  });
+function createRandomPlayer() {
+  if (randomPlayback.playerReady && randomPlayback.player) {
+    return Promise.resolve(randomPlayback.player);
+  }
+
+  if (randomPlayback.playerReadyPromise) {
+    return randomPlayback.playerReadyPromise;
+  }
+
+  randomPlayback.playerReadyPromise = loadYouTubeIframeAPI()
+    .then(
+      (YTApi) =>
+        new Promise((resolve, reject) => {
+          randomPlayback.playerReadyResolve = resolve;
+          try {
+            randomPlayback.player = new YTApi.Player(els.randomPlayer, {
+              playerVars: {
+                autoplay: 0,
+                controls: 1,
+                fs: 1,
+                modestbranding: 1,
+                playsinline: 1,
+                rel: 0,
+                origin: window.location.origin,
+              },
+              events: {
+                onReady: (event) => {
+                  randomPlayback.playerReady = true;
+                  randomPlayback.playerReadyResolve?.(event.target);
+                  randomPlayback.playerReadyResolve = null;
+                },
+                onStateChange: handleRandomPlayerStateChange,
+                onError: handleRandomPlayerError,
+                onAutoplayBlocked: () => {
+                  console.warn("YouTube blocked autoplay for the random player.");
+                },
+              },
+            });
+          } catch (error) {
+            randomPlayback.playerReadyResolve = null;
+            reject(error);
+          }
+        }),
+    )
+    .catch((error) => {
+      randomPlayback.playerReadyPromise = null;
+      throw error;
+    });
+
+  return randomPlayback.playerReadyPromise;
+}
+
+function enterRandomFullscreen() {
+  const container = els.randomOverlay;
+  try {
+    if (container.requestFullscreen) {
+      return container.requestFullscreen().catch(() => {});
+    }
+    if (container.webkitRequestFullscreen) {
+      return Promise.resolve(container.webkitRequestFullscreen()).catch(() => {});
+    }
+  } catch {
+    // 瀏覽器可能阻擋全螢幕，仍可在覆蓋層播放
+  }
+  return Promise.resolve();
+}
+
+function loadRandomVideo(video) {
+  if (!video || !randomPlayback.player || !randomPlayback.active) return false;
+
+  randomPlayback.currentVideoId = video.id;
+  try {
+    randomPlayback.player.loadVideoById({ videoId: video.id, startSeconds: 0 });
+    return true;
+  } catch (error) {
+    console.warn("無法載入隨機影片 " + video.id + "：" + error.message);
+    randomQueue.markUnavailable(video.id);
+    return false;
+  }
+}
+
+function stopRandomPlayback(message = "") {
+  if (message) console.warn(message);
+  closeRandomPlayer();
+  if (message) window.alert(message);
+}
+
+function playNextRandomVideo() {
+  if (!randomPlayback.active || !randomPlayback.player || randomPlayback.transitionInProgress) return;
+
+  randomPlayback.transitionInProgress = true;
+  const nextVideo = randomQueue.next(randomPlayback.currentVideoId);
+  if (!nextVideo) {
+    randomPlayback.transitionInProgress = false;
+    stopRandomPlayback("播放清單中沒有可播放的影片，已停止隨機播放。");
+    return;
+  }
+
+  const loaded = loadRandomVideo(nextVideo);
+  randomPlayback.transitionInProgress = false;
+  if (!loaded) playNextRandomVideo();
+}
+
+function handleRandomPlayerStateChange(event) {
+  if (!randomPlayback.active) return;
+
+  const videoId = event.target.getVideoData?.().video_id || null;
+  if (event.data === window.YT?.PlayerState?.PLAYING && videoId) {
+    randomPlayback.currentVideoId = videoId;
+    return;
+  }
+
+  if (event.data !== window.YT?.PlayerState?.ENDED) return;
+  if (videoId && videoId !== randomPlayback.currentVideoId) return;
+  playNextRandomVideo();
+}
+
+function handleRandomPlayerError(event) {
+  if (!randomPlayback.active) return;
+
+  const videoId = event.target.getVideoData?.().video_id || randomPlayback.currentVideoId;
+  if (videoId) randomQueue.markUnavailable(videoId);
+  console.warn(
+    "YouTube random player error" +
+      (event.data ? " (" + event.data + ")" : "") +
+      " for " +
+      (videoId || "unknown video"),
+  );
+  playNextRandomVideo();
 }
 
 let wakeLockSentinel = null;
@@ -386,7 +556,21 @@ function releaseWakeLock() {
 }
 
 function closeRandomPlayer() {
-  els.randomPlayer.src = "";
+  randomPlayback.active = false;
+  randomPlayback.generation += 1;
+  randomPlayback.transitionInProgress = false;
+  randomPlayback.currentVideoId = null;
+
+  if (randomPlayback.player?.stopVideo) {
+    try {
+      randomPlayback.player.stopVideo();
+    } catch {
+      // Player may still be initializing.
+    }
+  } else {
+    els.randomPlayer.src = "";
+  }
+
   els.randomOverlay.classList.add("hidden");
   document.body.classList.remove("random-playing");
 
@@ -403,25 +587,33 @@ async function startRandomFullscreen() {
     return;
   }
 
-  const video = pickRandomVideo();
-  if (!video) return;
+  randomPlayback.active = true;
+  randomPlayback.generation += 1;
+  randomPlayback.currentVideoId = null;
+  randomPlayback.transitionInProgress = false;
+  randomQueue.setVideos(state.videos);
+  randomQueue.clearUnavailable();
 
-  els.randomPlayer.src = buildShuffleEmbedUrl(video.id);
   els.randomOverlay.classList.remove("hidden");
   document.body.classList.add("random-playing");
 
-  await requestWakeLock();
-
-  const container = els.randomOverlay;
+  const generation = randomPlayback.generation;
+  const fullscreenPromise = enterRandomFullscreen();
   try {
-    if (container.requestFullscreen) {
-      await container.requestFullscreen();
-    } else if (container.webkitRequestFullscreen) {
-      await container.webkitRequestFullscreen();
+    await requestWakeLock();
+    await createRandomPlayer();
+    if (!randomPlayback.active || generation !== randomPlayback.generation) return;
+
+    const firstVideo = randomQueue.next();
+    if (!firstVideo || !loadRandomVideo(firstVideo)) {
+      playNextRandomVideo();
     }
-  } catch {
-    // 瀏覽器可能阻擋全螢幕，仍可在覆蓋層播放
+  } catch (error) {
+    if (randomPlayback.active && generation === randomPlayback.generation) {
+      stopRandomPlayback("隨機播放器載入失敗：" + error.message);
+    }
   }
+  await fullscreenPromise;
 }
 
 function openVideo(videoId, { updateHistory = false } = {}) {
@@ -496,9 +688,15 @@ async function loadChannel(forceRefresh = false) {
 
   try {
     const endpoint = forceRefresh ? `${DATA_URL}?t=${Date.now()}` : DATA_URL;
-    const response = await fetch(endpoint, {
+    let response = await fetch(endpoint, {
       cache: forceRefresh ? "no-store" : "default",
     });
+    if (!response.ok && DATA_URL !== "/data/channel.json") {
+      response = await fetch(
+        "/data/channel.json" + (forceRefresh ? "?t=" + Date.now() : ""),
+        { cache: forceRefresh ? "no-store" : "default" },
+      );
+    }
     if (!response.ok) {
       throw new Error("無法載入播放清單資料");
     }
@@ -507,6 +705,7 @@ async function loadChannel(forceRefresh = false) {
     state.playlist = payload.playlist;
     state.videos = payload.videos || [];
     state.filtered = [...state.videos];
+    randomQueue.setVideos(state.videos);
     applyPlaylist(state.playlist);
     applyChannel(state.channel);
     applyContact(payload.contact);
