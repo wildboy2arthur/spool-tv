@@ -356,9 +356,12 @@ const randomPlayback = {
   playerReady: false,
   playerReadyPromise: null,
   playerReadyResolve: null,
+  playerStates: { PLAYING: 1, ENDED: 0 },
+  stateMonitorId: null,
   active: false,
   generation: 0,
   currentVideoId: null,
+  lastEndedVideoId: null,
   transitionInProgress: false,
 };
 
@@ -413,6 +416,10 @@ function createRandomPlayer() {
     .then(
       (YTApi) =>
         new Promise((resolve, reject) => {
+          randomPlayback.playerStates = {
+            ...randomPlayback.playerStates,
+            ...(YTApi.PlayerState || {}),
+          };
           randomPlayback.playerReadyResolve = resolve;
           try {
             randomPlayback.player = new YTApi.Player(els.randomPlayer, {
@@ -454,9 +461,19 @@ function createRandomPlayer() {
 
 function enterRandomFullscreen() {
   const container = els.randomOverlay;
+  if (document.fullscreenElement) return Promise.resolve();
+
+  const fullscreenTarget = document.documentElement?.requestFullscreen
+    ? document.documentElement
+    : container;
   try {
-    if (container.requestFullscreen) {
-      return container.requestFullscreen().catch(() => {});
+    if (fullscreenTarget.requestFullscreen) {
+      return Promise.resolve(
+        fullscreenTarget.requestFullscreen({ navigationUI: "hide" }),
+      ).catch(() => {
+        if (fullscreenTarget === container || !container.requestFullscreen) return;
+        return Promise.resolve(container.requestFullscreen()).catch(() => {});
+      });
     }
     if (container.webkitRequestFullscreen) {
       return Promise.resolve(container.webkitRequestFullscreen()).catch(() => {});
@@ -471,6 +488,7 @@ function loadRandomVideo(video) {
   if (!video || !randomPlayback.player || !randomPlayback.active) return false;
 
   randomPlayback.currentVideoId = video.id;
+  randomPlayback.lastEndedVideoId = null;
   try {
     randomPlayback.player.loadVideoById({ videoId: video.id, startSeconds: 0 });
     return true;
@@ -485,6 +503,53 @@ function stopRandomPlayback(message = "") {
   if (message) console.warn(message);
   closeRandomPlayer();
   if (message) window.alert(message);
+}
+
+function getRandomPlayerVideoId() {
+  try {
+    return randomPlayback.player?.getVideoData?.().video_id || randomPlayback.currentVideoId;
+  } catch {
+    return randomPlayback.currentVideoId;
+  }
+}
+
+function handleRandomVideoEnded(videoId = null) {
+  if (!randomPlayback.active) return;
+
+  const endedVideoId = videoId || getRandomPlayerVideoId();
+  if (endedVideoId && randomPlayback.currentVideoId && endedVideoId !== randomPlayback.currentVideoId) {
+    return;
+  }
+
+  const endedKey = endedVideoId || randomPlayback.currentVideoId || "unknown";
+  if (randomPlayback.lastEndedVideoId === endedKey) return;
+  randomPlayback.lastEndedVideoId = endedKey;
+  playNextRandomVideo();
+}
+
+function stopRandomPlayerMonitor() {
+  if (randomPlayback.stateMonitorId !== null) {
+    window.clearInterval(randomPlayback.stateMonitorId);
+    randomPlayback.stateMonitorId = null;
+  }
+}
+
+function startRandomPlayerMonitor() {
+  stopRandomPlayerMonitor();
+  randomPlayback.stateMonitorId = window.setInterval(() => {
+    if (!randomPlayback.active || !randomPlayback.player) return;
+
+    let playerState = null;
+    try {
+      playerState = randomPlayback.player.getPlayerState?.();
+    } catch {
+      return;
+    }
+
+    if (playerState === randomPlayback.playerStates.ENDED) {
+      handleRandomVideoEnded(getRandomPlayerVideoId());
+    }
+  }, 500);
 }
 
 function playNextRandomVideo() {
@@ -507,14 +572,14 @@ function handleRandomPlayerStateChange(event) {
   if (!randomPlayback.active) return;
 
   const videoId = event.target.getVideoData?.().video_id || null;
-  if (event.data === window.YT?.PlayerState?.PLAYING && videoId) {
+  if (event.data === randomPlayback.playerStates.PLAYING && videoId) {
     randomPlayback.currentVideoId = videoId;
     return;
   }
 
-  if (event.data !== window.YT?.PlayerState?.ENDED) return;
-  if (videoId && videoId !== randomPlayback.currentVideoId) return;
-  playNextRandomVideo();
+  if (event.data === randomPlayback.playerStates.ENDED) {
+    handleRandomVideoEnded(videoId);
+  }
 }
 
 function handleRandomPlayerError(event) {
@@ -558,8 +623,10 @@ function releaseWakeLock() {
 function closeRandomPlayer() {
   randomPlayback.active = false;
   randomPlayback.generation += 1;
+  stopRandomPlayerMonitor();
   randomPlayback.transitionInProgress = false;
   randomPlayback.currentVideoId = null;
+  randomPlayback.lastEndedVideoId = null;
 
   if (randomPlayback.player?.stopVideo) {
     try {
@@ -598,14 +665,24 @@ async function startRandomFullscreen() {
   document.body.classList.add("random-playing");
 
   const generation = randomPlayback.generation;
+  const firstVideo = randomQueue.next();
   const fullscreenPromise = enterRandomFullscreen();
+  const playerWasReady = randomPlayback.playerReady && randomPlayback.player;
   try {
+    if (playerWasReady && firstVideo && loadRandomVideo(firstVideo)) {
+      startRandomPlayerMonitor();
+    }
+
     await requestWakeLock();
     await createRandomPlayer();
     if (!randomPlayback.active || generation !== randomPlayback.generation) return;
 
-    const firstVideo = randomQueue.next();
-    if (!firstVideo || !loadRandomVideo(firstVideo)) {
+    if (!playerWasReady) {
+      startRandomPlayerMonitor();
+      if (!firstVideo || !loadRandomVideo(firstVideo)) {
+        playNextRandomVideo();
+      }
+    } else if (!firstVideo) {
       playNextRandomVideo();
     }
   } catch (error) {
@@ -999,3 +1076,8 @@ document.addEventListener("visibilitychange", async () => {
 renderPortfolioGrid();
 
 loadChannel().then(handleRoute);
+
+// 先建立隨機播放器，讓使用者按下按鈕時能在同一個操作手勢中載入第一支影片。
+createRandomPlayer().catch((error) => {
+  console.warn("隨機播放器預載入失敗：" + error.message);
+});
