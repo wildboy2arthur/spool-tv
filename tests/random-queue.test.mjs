@@ -42,8 +42,19 @@ test("single-video queue is allowed to repeat", () => {
   const queue = new RandomQueue(keepOrder);
   queue.setVideos(videos(["only"]));
 
+  assert.equal(queue.getAvailableCount(), 1);
   assert.equal(queue.next()?.id, "only");
   assert.equal(queue.next("only")?.id, "only");
+});
+
+test("available count excludes videos that failed to play", () => {
+  const queue = new RandomQueue(keepOrder);
+  queue.setVideos(videos(["a", "b", "c"]));
+
+  queue.markUnavailable("b");
+
+  assert.equal(queue.getAvailableCount(), 2);
+  assert.notEqual(queue.next("a")?.id, "a");
 });
 
 test("unavailable videos are skipped and removed from the current cycle", () => {

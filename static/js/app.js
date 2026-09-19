@@ -362,6 +362,7 @@ const randomPlayback = {
   generation: 0,
   currentVideoId: null,
   currentVideoStarted: false,
+  lastFinishedVideoId: null,
   lastEndedVideoId: null,
   lastEndedAt: 0,
   transitionInProgress: false,
@@ -491,7 +492,6 @@ function loadRandomVideo(video) {
 
   randomPlayback.currentVideoId = video.id;
   randomPlayback.currentVideoStarted = false;
-  randomPlayback.lastEndedVideoId = null;
   try {
     randomPlayback.player.loadVideoById({ videoId: video.id, startSeconds: 0 });
     return true;
@@ -524,6 +524,7 @@ function handleRandomVideoEnded() {
 
   randomPlayback.lastEndedVideoId = randomPlayback.currentVideoId;
   randomPlayback.lastEndedAt = now;
+  randomPlayback.lastFinishedVideoId = randomPlayback.currentVideoId;
   randomPlayback.currentVideoStarted = false;
   playNextRandomVideo();
 }
@@ -555,11 +556,39 @@ function startRandomPlayerMonitor() {
   }, 500);
 }
 
+function getNextRandomVideo() {
+  const availableCount = randomQueue.getAvailableCount();
+  if (!availableCount) return null;
+
+  const lastFinishedVideoId = randomPlayback.lastFinishedVideoId;
+  const videoToAvoid = lastFinishedVideoId || randomPlayback.currentVideoId;
+  const maxAttempts = Math.max(availableCount * 2, 4);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const candidate = randomQueue.next(videoToAvoid);
+    if (!candidate) return null;
+
+    // A finished video is never allowed to be selected again while another
+    // playable video exists. Keep asking the queue if a stale queue state
+    // happens to return the same id.
+    if (availableCount <= 1 || candidate.id !== lastFinishedVideoId) {
+      return candidate;
+    }
+  }
+
+  console.warn(
+    "Random queue could not find a different video after " +
+      maxAttempts +
+      " attempts.",
+  );
+  return null;
+}
+
 function playNextRandomVideo() {
   if (!randomPlayback.active || !randomPlayback.player || randomPlayback.transitionInProgress) return;
 
   randomPlayback.transitionInProgress = true;
-  const nextVideo = randomQueue.next(randomPlayback.currentVideoId);
+  const nextVideo = getNextRandomVideo();
   if (!nextVideo) {
     randomPlayback.transitionInProgress = false;
     stopRandomPlayback("播放清單中沒有可播放的影片，已停止隨機播放。");
@@ -630,6 +659,7 @@ function closeRandomPlayer() {
   randomPlayback.transitionInProgress = false;
   randomPlayback.currentVideoId = null;
   randomPlayback.currentVideoStarted = false;
+  randomPlayback.lastFinishedVideoId = null;
   randomPlayback.lastEndedVideoId = null;
   randomPlayback.lastEndedAt = 0;
 
@@ -662,6 +692,7 @@ async function startRandomFullscreen() {
   randomPlayback.active = true;
   randomPlayback.generation += 1;
   randomPlayback.currentVideoId = null;
+  randomPlayback.lastFinishedVideoId = null;
   randomPlayback.transitionInProgress = false;
   randomQueue.setVideos(state.videos);
   randomQueue.clearUnavailable();

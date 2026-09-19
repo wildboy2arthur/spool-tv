@@ -45,6 +45,10 @@ export class RandomQueue {
     this.index = -1;
   }
 
+  getAvailableCount() {
+    return this.videos.filter((video) => !this.unavailableIds.has(video.id)).length;
+  }
+
   markUnavailable(videoId) {
     if (!videoId) return;
     this.unavailableIds.add(videoId);
