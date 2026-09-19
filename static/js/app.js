@@ -361,7 +361,9 @@ const randomPlayback = {
   active: false,
   generation: 0,
   currentVideoId: null,
+  currentVideoStarted: false,
   lastEndedVideoId: null,
+  lastEndedAt: 0,
   transitionInProgress: false,
 };
 
@@ -488,6 +490,7 @@ function loadRandomVideo(video) {
   if (!video || !randomPlayback.player || !randomPlayback.active) return false;
 
   randomPlayback.currentVideoId = video.id;
+  randomPlayback.currentVideoStarted = false;
   randomPlayback.lastEndedVideoId = null;
   try {
     randomPlayback.player.loadVideoById({ videoId: video.id, startSeconds: 0 });
@@ -505,25 +508,23 @@ function stopRandomPlayback(message = "") {
   if (message) window.alert(message);
 }
 
-function getRandomPlayerVideoId() {
-  try {
-    return randomPlayback.player?.getVideoData?.().video_id || randomPlayback.currentVideoId;
-  } catch {
-    return randomPlayback.currentVideoId;
-  }
-}
-
-function handleRandomVideoEnded(videoId = null) {
+function handleRandomVideoEnded() {
   if (!randomPlayback.active) return;
-
-  const endedVideoId = videoId || getRandomPlayerVideoId();
-  if (endedVideoId && randomPlayback.currentVideoId && endedVideoId !== randomPlayback.currentVideoId) {
+  if (!randomPlayback.currentVideoId || !randomPlayback.currentVideoStarted) {
     return;
   }
 
-  const endedKey = endedVideoId || randomPlayback.currentVideoId || "unknown";
-  if (randomPlayback.lastEndedVideoId === endedKey) return;
-  randomPlayback.lastEndedVideoId = endedKey;
+  const now = Date.now();
+  if (
+    randomPlayback.lastEndedVideoId === randomPlayback.currentVideoId &&
+    now - randomPlayback.lastEndedAt < 1500
+  ) {
+    return;
+  }
+
+  randomPlayback.lastEndedVideoId = randomPlayback.currentVideoId;
+  randomPlayback.lastEndedAt = now;
+  randomPlayback.currentVideoStarted = false;
   playNextRandomVideo();
 }
 
@@ -546,8 +547,10 @@ function startRandomPlayerMonitor() {
       return;
     }
 
-    if (playerState === randomPlayback.playerStates.ENDED) {
-      handleRandomVideoEnded(getRandomPlayerVideoId());
+    if (playerState === randomPlayback.playerStates.PLAYING) {
+      randomPlayback.currentVideoStarted = true;
+    } else if (playerState === randomPlayback.playerStates.ENDED) {
+      handleRandomVideoEnded();
     }
   }, 500);
 }
@@ -571,27 +574,27 @@ function playNextRandomVideo() {
 function handleRandomPlayerStateChange(event) {
   if (!randomPlayback.active) return;
 
-  const videoId = event.target.getVideoData?.().video_id || null;
-  if (event.data === randomPlayback.playerStates.PLAYING && videoId) {
-    randomPlayback.currentVideoId = videoId;
+  if (event.data === randomPlayback.playerStates.PLAYING) {
+    randomPlayback.currentVideoStarted = true;
     return;
   }
 
   if (event.data === randomPlayback.playerStates.ENDED) {
-    handleRandomVideoEnded(videoId);
+    handleRandomVideoEnded();
   }
 }
 
 function handleRandomPlayerError(event) {
   if (!randomPlayback.active) return;
 
-  const videoId = event.target.getVideoData?.().video_id || randomPlayback.currentVideoId;
+  const reportedVideoId = event.target.getVideoData?.().video_id || null;
+  const videoId = randomPlayback.currentVideoId || reportedVideoId;
   if (videoId) randomQueue.markUnavailable(videoId);
   console.warn(
     "YouTube random player error" +
       (event.data ? " (" + event.data + ")" : "") +
       " for " +
-      (videoId || "unknown video"),
+      (reportedVideoId || videoId || "unknown video"),
   );
   playNextRandomVideo();
 }
@@ -626,7 +629,9 @@ function closeRandomPlayer() {
   stopRandomPlayerMonitor();
   randomPlayback.transitionInProgress = false;
   randomPlayback.currentVideoId = null;
+  randomPlayback.currentVideoStarted = false;
   randomPlayback.lastEndedVideoId = null;
+  randomPlayback.lastEndedAt = 0;
 
   if (randomPlayback.player?.stopVideo) {
     try {
