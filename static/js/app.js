@@ -364,6 +364,9 @@ const randomPlayback = {
   currentVideoId: null,
   actualVideoId: null,
   currentVideoStarted: false,
+  lastObservedVideoId: null,
+  lastObservedTime: null,
+  lastObservedDuration: null,
   lastFinishedVideoId: null,
   lastEndedVideoId: null,
   lastEndedAt: 0,
@@ -510,6 +513,7 @@ function loadRandomVideo(video) {
   randomPlayback.currentVideoId = video.id;
   randomPlayback.actualVideoId = null;
   randomPlayback.currentVideoStarted = false;
+  resetRandomPlaybackProgress();
   randomPlayback.lastTransitionAt = Date.now();
   try {
     // loadVideoById both selects and starts the exact video. Calling
@@ -551,6 +555,12 @@ function getRandomPlayerVideoId(player = randomPlayback.player) {
   } catch {
     return null;
   }
+}
+
+function resetRandomPlaybackProgress() {
+  randomPlayback.lastObservedVideoId = null;
+  randomPlayback.lastObservedTime = null;
+  randomPlayback.lastObservedDuration = null;
 }
 
 function retryPendingRandomVideo(reportedVideoId = null) {
@@ -648,6 +658,17 @@ function startRandomPlayerMonitor() {
     const expectedVideoId =
       randomPlayback.pendingVideoId || randomPlayback.currentVideoId;
 
+    let currentTime = null;
+    let duration = null;
+    try {
+      const nextCurrentTime = Number(randomPlayback.player.getCurrentTime?.());
+      const nextDuration = Number(randomPlayback.player.getDuration?.());
+      currentTime = Number.isFinite(nextCurrentTime) ? nextCurrentTime : null;
+      duration = Number.isFinite(nextDuration) ? nextDuration : null;
+    } catch {
+      // The iframe may briefly be unavailable while changing videos.
+    }
+
     if (
       playerState === randomPlayback.playerStates.PLAYING &&
       reportedVideoId &&
@@ -659,12 +680,41 @@ function startRandomPlayerMonitor() {
     }
 
     if (playerState === randomPlayback.playerStates.PLAYING) {
+      const now = Date.now();
+      const loopedToStart =
+        randomPlayback.currentVideoStarted &&
+        reportedVideoId &&
+        randomPlayback.lastObservedVideoId === reportedVideoId &&
+        Number.isFinite(currentTime) &&
+        Number.isFinite(duration) &&
+        Number.isFinite(randomPlayback.lastObservedTime) &&
+        Number.isFinite(randomPlayback.lastObservedDuration) &&
+        randomPlayback.lastObservedTime >=
+          Math.max(
+            randomPlayback.lastObservedDuration - 1.5,
+            randomPlayback.lastObservedDuration * 0.95,
+          ) &&
+        currentTime <= 1.5 &&
+        now - randomPlayback.lastTransitionAt >= 1500;
+
+      if (loopedToStart) {
+        console.warn(
+          "Random player looped the same video from its end; advancing from " +
+            reportedVideoId,
+        );
+        handleRandomVideoEnded(reportedVideoId);
+        return;
+      }
+
       if (reportedVideoId) {
         randomPlayback.currentVideoId = reportedVideoId;
         randomPlayback.pendingVideoId = null;
         randomPlayback.actualVideoId = reportedVideoId;
       }
       randomPlayback.currentVideoStarted = true;
+      randomPlayback.lastObservedVideoId = reportedVideoId;
+      randomPlayback.lastObservedTime = currentTime;
+      randomPlayback.lastObservedDuration = duration;
     } else if (playerState === randomPlayback.playerStates.ENDED) {
       handleRandomVideoEnded(reportedVideoId);
     }
@@ -797,6 +847,7 @@ function closeRandomPlayer() {
   randomPlayback.actualVideoId = null;
   randomPlayback.currentVideoId = null;
   randomPlayback.currentVideoStarted = false;
+  resetRandomPlaybackProgress();
   randomPlayback.lastFinishedVideoId = null;
   randomPlayback.lastEndedVideoId = null;
   randomPlayback.lastEndedAt = 0;
@@ -833,6 +884,7 @@ async function startRandomFullscreen() {
   randomPlayback.pendingVideoId = null;
   randomPlayback.actualVideoId = null;
   randomPlayback.currentVideoId = null;
+  resetRandomPlaybackProgress();
   randomPlayback.lastFinishedVideoId = null;
   randomPlayback.lastTransitionAt = 0;
   randomPlayback.transitionInProgress = false;
