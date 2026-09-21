@@ -38,6 +38,19 @@ test("queue does not repeat the current video until another video is available",
   assert.deepEqual(played, ["a", "b", "c", "a"]);
 });
 
+test("queue keeps the last finished id out of the next 12 transitions", () => {
+  const queue = new RandomQueue(keepOrder);
+  queue.setVideos(videos(["a", "b", "c", "d"]));
+
+  const played = [queue.next()?.id];
+  while (played.length < 13) {
+    const next = queue.next(played.at(-1));
+    assert.ok(next);
+    assert.notEqual(next.id, played.at(-1));
+    played.push(next.id);
+  }
+});
+
 test("single-video queue is allowed to repeat", () => {
   const queue = new RandomQueue(keepOrder);
   queue.setVideos(videos(["only"]));

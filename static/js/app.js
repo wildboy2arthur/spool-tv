@@ -365,6 +365,7 @@ const randomPlayback = {
   lastFinishedVideoId: null,
   lastEndedVideoId: null,
   lastEndedAt: 0,
+  lastTransitionAt: 0,
   transitionInProgress: false,
 };
 
@@ -490,10 +491,34 @@ function enterRandomFullscreen() {
 function loadRandomVideo(video) {
   if (!video || !randomPlayback.player || !randomPlayback.active) return false;
 
+  const availableCount = randomQueue.getAvailableCount();
+  if (
+    availableCount > 1 &&
+    randomPlayback.lastFinishedVideoId &&
+    video.id === randomPlayback.lastFinishedVideoId
+  ) {
+    console.warn(
+      "Random player rejected a candidate that matches the last finished video: " +
+        video.id,
+    );
+    return false;
+  }
+
   randomPlayback.currentVideoId = video.id;
   randomPlayback.currentVideoStarted = false;
+  randomPlayback.lastTransitionAt = Date.now();
   try {
-    randomPlayback.player.loadVideoById({ videoId: video.id, startSeconds: 0 });
+    // Cue the exact candidate first, then start it. This avoids retaining a
+    // stale YouTube playlist item when the previous video has just ended.
+    if (
+      typeof randomPlayback.player.cueVideoById === "function" &&
+      typeof randomPlayback.player.playVideo === "function"
+    ) {
+      randomPlayback.player.cueVideoById({ videoId: video.id, startSeconds: 0 });
+      randomPlayback.player.playVideo();
+    } else {
+      randomPlayback.player.loadVideoById({ videoId: video.id, startSeconds: 0 });
+    }
     return true;
   } catch (error) {
     console.warn("無法載入隨機影片 " + video.id + "：" + error.message);
@@ -515,6 +540,15 @@ function handleRandomVideoEnded() {
   }
 
   const now = Date.now();
+  if (
+    randomPlayback.lastTransitionAt &&
+    now - randomPlayback.lastTransitionAt < 1500
+  ) {
+    // A YouTube ENDED event from the previous item can arrive just after the
+    // next item has been cued. Do not consume another queue item in that gap.
+    return;
+  }
+
   if (
     randomPlayback.lastEndedVideoId === randomPlayback.currentVideoId &&
     now - randomPlayback.lastEndedAt < 1500
@@ -662,6 +696,7 @@ function closeRandomPlayer() {
   randomPlayback.lastFinishedVideoId = null;
   randomPlayback.lastEndedVideoId = null;
   randomPlayback.lastEndedAt = 0;
+  randomPlayback.lastTransitionAt = 0;
 
   if (randomPlayback.player?.stopVideo) {
     try {
@@ -693,6 +728,7 @@ async function startRandomFullscreen() {
   randomPlayback.generation += 1;
   randomPlayback.currentVideoId = null;
   randomPlayback.lastFinishedVideoId = null;
+  randomPlayback.lastTransitionAt = 0;
   randomPlayback.transitionInProgress = false;
   randomQueue.setVideos(state.videos);
   randomQueue.clearUnavailable();
