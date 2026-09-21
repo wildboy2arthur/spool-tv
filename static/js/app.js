@@ -362,6 +362,7 @@ const randomPlayback = {
   generation: 0,
   pendingVideoId: null,
   currentVideoId: null,
+  actualVideoId: null,
   currentVideoStarted: false,
   lastFinishedVideoId: null,
   lastEndedVideoId: null,
@@ -507,6 +508,7 @@ function loadRandomVideo(video) {
 
   randomPlayback.pendingVideoId = video.id;
   randomPlayback.currentVideoId = video.id;
+  randomPlayback.actualVideoId = null;
   randomPlayback.currentVideoStarted = false;
   randomPlayback.lastTransitionAt = Date.now();
   try {
@@ -514,6 +516,10 @@ function loadRandomVideo(video) {
     // cueVideoById() and playVideo() back-to-back can leave the YouTube iframe
     // playing the previous item while our state already points at the next id.
     if (typeof randomPlayback.player.loadVideoById === "function") {
+      // Stop the previous item explicitly before switching. This suppresses
+      // late callbacks that otherwise can replay the old item after the next
+      // id has already been selected.
+      randomPlayback.player.stopVideo?.();
       randomPlayback.player.loadVideoById({ videoId: video.id, startSeconds: 0 });
     } else if (
       typeof randomPlayback.player.cueVideoById === "function" &&
@@ -613,6 +619,7 @@ function handleRandomVideoEnded(reportedVideoId = null) {
   randomPlayback.lastEndedVideoId = actualVideoId;
   randomPlayback.lastEndedAt = now;
   randomPlayback.lastFinishedVideoId = actualVideoId;
+  randomPlayback.actualVideoId = actualVideoId;
   randomPlayback.currentVideoStarted = false;
   randomPlayback.pendingVideoId = null;
   playNextRandomVideo();
@@ -655,6 +662,7 @@ function startRandomPlayerMonitor() {
       if (reportedVideoId) {
         randomPlayback.currentVideoId = reportedVideoId;
         randomPlayback.pendingVideoId = null;
+        randomPlayback.actualVideoId = reportedVideoId;
       }
       randomPlayback.currentVideoStarted = true;
     } else if (playerState === randomPlayback.playerStates.ENDED) {
@@ -726,6 +734,7 @@ function handleRandomPlayerStateChange(event) {
     if (reportedVideoId) {
       randomPlayback.currentVideoId = reportedVideoId;
       randomPlayback.pendingVideoId = null;
+      randomPlayback.actualVideoId = reportedVideoId;
     }
     randomPlayback.currentVideoStarted = true;
     return;
@@ -744,6 +753,7 @@ function handleRandomPlayerError(event) {
     randomPlayback.pendingVideoId || randomPlayback.currentVideoId || reportedVideoId;
   if (videoId) randomQueue.markUnavailable(videoId);
   randomPlayback.pendingVideoId = null;
+  randomPlayback.actualVideoId = null;
   randomPlayback.currentVideoStarted = false;
   console.warn(
     "YouTube random player error" +
@@ -784,6 +794,7 @@ function closeRandomPlayer() {
   stopRandomPlayerMonitor();
   randomPlayback.transitionInProgress = false;
   randomPlayback.pendingVideoId = null;
+  randomPlayback.actualVideoId = null;
   randomPlayback.currentVideoId = null;
   randomPlayback.currentVideoStarted = false;
   randomPlayback.lastFinishedVideoId = null;
@@ -820,6 +831,7 @@ async function startRandomFullscreen() {
   randomPlayback.active = true;
   randomPlayback.generation += 1;
   randomPlayback.pendingVideoId = null;
+  randomPlayback.actualVideoId = null;
   randomPlayback.currentVideoId = null;
   randomPlayback.lastFinishedVideoId = null;
   randomPlayback.lastTransitionAt = 0;

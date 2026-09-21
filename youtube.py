@@ -218,9 +218,18 @@ async def _fetch_videos_rss(client: httpx.AsyncClient) -> list[dict[str, Any]]:
 
 
 def _apply_video_limit(videos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for video in videos:
+        video_id = video.get("id")
+        if not video_id or video_id in seen_ids:
+            continue
+        seen_ids.add(video_id)
+        unique.append(video)
+
     if VIDEO_LIMIT and VIDEO_LIMIT > 0:
-        return videos[:VIDEO_LIMIT]
-    return videos
+        return unique[:VIDEO_LIMIT]
+    return unique
 
 
 def _find_yt_dlp() -> str:
