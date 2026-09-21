@@ -360,6 +360,7 @@ const randomPlayback = {
   stateMonitorId: null,
   active: false,
   generation: 0,
+  pendingVideoId: null,
   currentVideoId: null,
   currentVideoStarted: false,
   lastFinishedVideoId: null,
@@ -504,20 +505,31 @@ function loadRandomVideo(video) {
     return false;
   }
 
+  randomPlayback.pendingVideoId = video.id;
   randomPlayback.currentVideoId = video.id;
   randomPlayback.currentVideoStarted = false;
   randomPlayback.lastTransitionAt = Date.now();
   try {
-    // Cue the exact candidate first, then start it. This avoids retaining a
-    // stale YouTube playlist item when the previous video has just ended.
-    if (
+    // loadVideoById both selects and starts the exact video. Calling
+    // cueVideoById() and playVideo() back-to-back can leave the YouTube iframe
+    // playing the previous item while our state already points at the next id.
+    if (typeof randomPlayback.player.loadVideoById === "function") {
+      randomPlayback.player.loadVideoById({ videoId: video.id, startSeconds: 0 });
+    } else if (
       typeof randomPlayback.player.cueVideoById === "function" &&
       typeof randomPlayback.player.playVideo === "function"
     ) {
       randomPlayback.player.cueVideoById({ videoId: video.id, startSeconds: 0 });
-      randomPlayback.player.playVideo();
+      window.setTimeout(() => {
+        if (
+          randomPlayback.active &&
+          randomPlayback.pendingVideoId === video.id
+        ) {
+          randomPlayback.player.playVideo();
+        }
+      }, 150);
     } else {
-      randomPlayback.player.loadVideoById({ videoId: video.id, startSeconds: 0 });
+      throw new Error("YouTube player cannot load a video by id");
     }
     return true;
   } catch (error) {
@@ -527,15 +539,57 @@ function loadRandomVideo(video) {
   }
 }
 
+function getRandomPlayerVideoId(player = randomPlayback.player) {
+  try {
+    return player?.getVideoData?.().video_id || null;
+  } catch {
+    return null;
+  }
+}
+
+function retryPendingRandomVideo(reportedVideoId = null) {
+  const expectedVideoId =
+    randomPlayback.pendingVideoId || randomPlayback.currentVideoId;
+  if (
+    !randomPlayback.active ||
+    !expectedVideoId ||
+    reportedVideoId === expectedVideoId
+  ) {
+    return;
+  }
+
+  const expectedVideo = state.videos.find((video) => video.id === expectedVideoId);
+  if (!expectedVideo || !randomPlayback.player) return;
+
+  console.warn(
+    "Random player reported stale video " +
+      (reportedVideoId || "unknown") +
+      "; retrying " +
+      expectedVideoId,
+  );
+  loadRandomVideo(expectedVideo);
+}
+
 function stopRandomPlayback(message = "") {
   if (message) console.warn(message);
   closeRandomPlayer();
   if (message) window.alert(message);
 }
 
-function handleRandomVideoEnded() {
+function handleRandomVideoEnded(reportedVideoId = null) {
   if (!randomPlayback.active) return;
   if (!randomPlayback.currentVideoId || !randomPlayback.currentVideoStarted) {
+    return;
+  }
+
+  const actualVideoId =
+    reportedVideoId || getRandomPlayerVideoId() || randomPlayback.currentVideoId;
+  const expectedVideoId =
+    randomPlayback.pendingVideoId || randomPlayback.currentVideoId;
+  if (actualVideoId && expectedVideoId && actualVideoId !== expectedVideoId) {
+    // Ignore an ENDED event from the old iframe item. It must not advance the
+    // random queue or mark the wrong video as finished.
+    retryPendingRandomVideo(actualVideoId);
     return;
   }
 
@@ -556,10 +610,11 @@ function handleRandomVideoEnded() {
     return;
   }
 
-  randomPlayback.lastEndedVideoId = randomPlayback.currentVideoId;
+  randomPlayback.lastEndedVideoId = actualVideoId;
   randomPlayback.lastEndedAt = now;
-  randomPlayback.lastFinishedVideoId = randomPlayback.currentVideoId;
+  randomPlayback.lastFinishedVideoId = actualVideoId;
   randomPlayback.currentVideoStarted = false;
+  randomPlayback.pendingVideoId = null;
   playNextRandomVideo();
 }
 
@@ -582,10 +637,28 @@ function startRandomPlayerMonitor() {
       return;
     }
 
+    const reportedVideoId = getRandomPlayerVideoId();
+    const expectedVideoId =
+      randomPlayback.pendingVideoId || randomPlayback.currentVideoId;
+
+    if (
+      playerState === randomPlayback.playerStates.PLAYING &&
+      reportedVideoId &&
+      expectedVideoId &&
+      reportedVideoId !== expectedVideoId
+    ) {
+      retryPendingRandomVideo(reportedVideoId);
+      return;
+    }
+
     if (playerState === randomPlayback.playerStates.PLAYING) {
+      if (reportedVideoId) {
+        randomPlayback.currentVideoId = reportedVideoId;
+        randomPlayback.pendingVideoId = null;
+      }
       randomPlayback.currentVideoStarted = true;
     } else if (playerState === randomPlayback.playerStates.ENDED) {
-      handleRandomVideoEnded();
+      handleRandomVideoEnded(reportedVideoId);
     }
   }, 500);
 }
@@ -637,22 +710,41 @@ function playNextRandomVideo() {
 function handleRandomPlayerStateChange(event) {
   if (!randomPlayback.active) return;
 
+  const reportedVideoId = getRandomPlayerVideoId(event.target);
+  const expectedVideoId =
+    randomPlayback.pendingVideoId || randomPlayback.currentVideoId;
+
   if (event.data === randomPlayback.playerStates.PLAYING) {
+    if (
+      reportedVideoId &&
+      expectedVideoId &&
+      reportedVideoId !== expectedVideoId
+    ) {
+      retryPendingRandomVideo(reportedVideoId);
+      return;
+    }
+    if (reportedVideoId) {
+      randomPlayback.currentVideoId = reportedVideoId;
+      randomPlayback.pendingVideoId = null;
+    }
     randomPlayback.currentVideoStarted = true;
     return;
   }
 
   if (event.data === randomPlayback.playerStates.ENDED) {
-    handleRandomVideoEnded();
+    handleRandomVideoEnded(reportedVideoId);
   }
 }
 
 function handleRandomPlayerError(event) {
   if (!randomPlayback.active) return;
 
-  const reportedVideoId = event.target.getVideoData?.().video_id || null;
-  const videoId = randomPlayback.currentVideoId || reportedVideoId;
+  const reportedVideoId = getRandomPlayerVideoId(event.target);
+  const videoId =
+    randomPlayback.pendingVideoId || randomPlayback.currentVideoId || reportedVideoId;
   if (videoId) randomQueue.markUnavailable(videoId);
+  randomPlayback.pendingVideoId = null;
+  randomPlayback.currentVideoStarted = false;
   console.warn(
     "YouTube random player error" +
       (event.data ? " (" + event.data + ")" : "") +
@@ -691,6 +783,7 @@ function closeRandomPlayer() {
   randomPlayback.generation += 1;
   stopRandomPlayerMonitor();
   randomPlayback.transitionInProgress = false;
+  randomPlayback.pendingVideoId = null;
   randomPlayback.currentVideoId = null;
   randomPlayback.currentVideoStarted = false;
   randomPlayback.lastFinishedVideoId = null;
@@ -726,6 +819,7 @@ async function startRandomFullscreen() {
 
   randomPlayback.active = true;
   randomPlayback.generation += 1;
+  randomPlayback.pendingVideoId = null;
   randomPlayback.currentVideoId = null;
   randomPlayback.lastFinishedVideoId = null;
   randomPlayback.lastTransitionAt = 0;
